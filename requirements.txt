@@ -1,5 +1,8 @@
 streamlit
 pandas
 numpy
+transformers
+torch
+datasets
 scikit-learn
 nltk
