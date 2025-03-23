@@ -131,7 +131,3 @@ if st.button("Check Violations"):
         st.warning("Please enter a username.")
 
 st.write("**🔹 AI-powered moderation for a healthier online community.**")
-st.code("""
-pip install streamlit pandas numpy scikit-learn nltk
-streamlit run app.py
-""")
