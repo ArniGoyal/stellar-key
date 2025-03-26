@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import nltk
 import google.generativeai as genai
@@ -15,14 +16,18 @@ from torch.nn.functional import softmax
 # Load environment variables
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-cred_path = os.getenv("FIREBASE_CREDENTIALS")
+# Load Firebase credentials from Streamlit Secrets
+firebase_credentials = st.secrets["FIREBASE_CREDENTIALS"]
+
+# Convert string to JSON
+cred_dict = json.loads(firebase_credentials)
 
 # Configure Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Initialize Firebase (Prevent Duplicate Initialization)
 if not firebase_admin._apps:
-    cred = credentials.Certificate(cred_path)
+    cred = credentials.Certificate(cred_dict)
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
