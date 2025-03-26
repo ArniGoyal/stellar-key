@@ -1,5 +1,9 @@
 streamlit
 pandas
-numpy
-scikit-learn
 nltk
+google-generativeai
+firebase-admin
+torch
+transformers
+python-dotenv
+scikit-learn
