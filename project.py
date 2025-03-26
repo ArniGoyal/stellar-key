@@ -1,139 +1,161 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
+import os
 import re
 import nltk
+import google.generativeai as genai
+import firebase_admin
+import streamlit as st
+import pandas as pd
+import torch
 from nltk.corpus import stopwords
-from sklearn.model_selection import train_test_split
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report
+from dotenv import load_dotenv
+from firebase_admin import credentials, firestore
+from transformers import BertTokenizer, BertForSequenceClassification
+from torch.nn.functional import softmax
 
-# Download stopwords
+# Load environment variables
+load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+cred_path = os.getenv("FIREBASE_CREDENTIALS")
+
+# Configure Gemini API
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Initialize Firebase (Prevent Duplicate Initialization)
+if not firebase_admin._apps:
+    cred = credentials.Certificate(cred_path)
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+# Load stopwords
 nltk.download("stopwords")
+stop_words = set(stopwords.words("english"))
+stop_words.discard("no")
+stop_words.discard("not")
 
-# Load dataset
 @st.cache_data
 def load_data():
-    df = pd.read_csv("labeled_data.csv")  # Ensure dataset is in the same directory
+    df = pd.read_csv("labeled_data.csv")
     df = df.rename(columns={"class": "label", "tweet": "text"})
     return df
 
 df = load_data()
 
-# Data Preprocessing Function
 def clean_text(text):
     text = text.lower()
-    text = re.sub(r"http\S+", "", text)  # Remove URLs
-    text = re.sub(r"@\w+", "", text)  # Remove mentions
-    text = re.sub(r"#\w+", "", text)  # Remove hashtags
-    text = re.sub(r"[^a-zA-Z\s]", "", text)  # Remove special characters
+    text = re.sub(r"http\S+", "", text)
+    text = re.sub(r"@\w+", "", text)
+    text = re.sub(r"#\w+", "", text)
+    text = re.sub(r"[^a-zA-Z\s]", "", text)
     words = text.split()
-    words = [word for word in words if word not in stopwords.words("english")]
+    words = [word for word in words if word not in stop_words]
     return " ".join(words)
 
-# Apply Cleaning
 df["cleaned_text"] = df["text"].apply(clean_text)
 
-# Train-Test Split
-X_train, X_test, y_train, y_test = train_test_split(df["cleaned_text"], df["label"], test_size=0.2, random_state=42)
+# Load Pre-trained BERT Model
+tokenizer = BertTokenizer.from_pretrained("nlptown/bert-base-multilingual-uncased-sentiment")
+model = BertForSequenceClassification.from_pretrained("nlptown/bert-base-multilingual-uncased-sentiment")
 
-# Convert text to numerical features using TF-IDF
-vectorizer = TfidfVectorizer(max_features=5000)
-X_train_tfidf = vectorizer.fit_transform(X_train)
-X_test_tfidf = vectorizer.transform(X_test)
+def classify_text_bert(text):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    probs = softmax(outputs.logits, dim=1)
+    label = torch.argmax(probs, dim=1).item()
+    labels = {0: "🚨 Hate Speech", 1: "⚠️ Offensive Language", 2: "✅ Neutral"}
+    return labels.get(label, "⚠️ Unclassified")
 
-# Train Logistic Regression Model
-model = LogisticRegression()
-model.fit(X_train_tfidf, y_train)
+def classify_text_gemini(text):
+    response = genai.GenerativeModel("gemini-2.0-pro-exp").generate_content(f"Classify this message: {text}")
+    return response.text
 
-# Model Evaluation
-y_pred = model.predict(X_test_tfidf)
-accuracy = accuracy_score(y_test, y_pred)
+def track_violation(username):
+    doc_ref = db.collection("violations").document(username)
+    doc = doc_ref.get()
+    violations = doc.to_dict().get("count", 0) + 1 if doc.exists else 1
+    doc_ref.set({"count": violations})
+    return violations
+
+def teachable_moment(text):
+    response = genai.GenerativeModel("gemini-2.0-pro-exp").generate_content(f"Provide a teachable response to this message: {text}")
+    return response.text
+
+def apply_cooling_off(username):
+    db.collection("cooling_off").document(username).set({"status": "suspended"})
+    return f"User {username} has been temporarily suspended."
+
+def community_review(username, text):
+    db.collection("community_review").document(username).set({"message": text, "status": "pending"})
+    return "Message submitted for community moderation."
+
+def resolve_conflict(text):
+    response = genai.GenerativeModel("gemini-2.0-pro-exp").generate_content(f"Provide a de-escalation suggestion for this message: {text}")
+    return response.text
+
+def analyze_behavior(username):
+    violations = db.collection("violations").document(username).get()
+    return violations.to_dict().get("count", 0) if violations.exists else 0
 
 # Streamlit UI
 st.title("🛡️ AI-Powered Community Moderation System")
-st.write(f"**Model Accuracy:** {accuracy:.2%}")
 
-# Detect Harmful Content
 st.subheader("🔍 Detect Harmful Content")
 user_text = st.text_area("Enter a message to analyze:")
+
 if st.button("Analyze Text"):
     if user_text:
-        text_cleaned = clean_text(user_text)
-        text_vectorized = vectorizer.transform([text_cleaned])
-        prediction = model.predict(text_vectorized)[0]
-        labels = {0: "🚨 Hate Speech", 1: "⚠️ Offensive Language", 2: "✅ Neutral"}
-        st.write(f"**Detected:** {labels[prediction]}")
+        cleaned_text = clean_text(user_text)
+        bert_prediction = classify_text_bert(cleaned_text)
+        gemini_prediction = classify_text_gemini(cleaned_text)
+        st.write(f"**BERT Model Prediction:** {bert_prediction}")
+        st.write(f"**Gemini AI Prediction:** {gemini_prediction}")
+        st.write(f"**Teachable Moment:** {teachable_moment(cleaned_text)}")
     else:
         st.warning("Please enter a message.")
 
-# Teachable Moments
-st.subheader("💡 Teachable Moments")
-user_input = st.text_input("Enter a message for suggestion:")
-if st.button("Suggest Alternative"):
-    replacements = {
-        "stupid": "misinformed",
-        "idiot": "uninformed",
-        "dumb": "lacking perspective"
-    }
-    words = user_input.split()
-    for i, word in enumerate(words):
-        if word.lower() in replacements:
-            words[i] = replacements[word.lower()]
-    st.write("**Suggested Alternative:**", " ".join(words))
-
-# Cooling-Off Periods
-st.subheader("⏳ Apply Cooling-Off Period")
-user = st.text_input("Enter username for suspension:")
-cool_off_users = {}
-if st.button("Apply Cooling-Off"):
-    if user:
-        if user in cool_off_users:
-            st.warning(f"User {user} is already suspended.")
-        else:
-            cool_off_users[user] = "suspended"
-            st.success(f"User {user} has been temporarily suspended.")
-    else:
-        st.warning("Please enter a username.")
-
-# Community Moderation Panel
-st.subheader("🗳️ Community Moderation Panel")
-moderation_user = st.text_input("Enter username for review:")
-moderation_text = st.text_area("Enter message for community review:")
-community_votes = {}
-
-if st.button("Submit for Review"):
-    if moderation_user and moderation_text:
-        if moderation_user not in community_votes:
-            community_votes[moderation_user] = []
-        community_votes[moderation_user].append(moderation_text)
-        
-        if len(community_votes[moderation_user]) >= 3:
-            st.warning(f"Community voted to remove {moderation_user}'s message.")
-        else:
-            st.info(f"Message submitted for community review. Votes: {len(community_votes[moderation_user])}/3")
-    else:
-        st.warning("Please enter a username and message.")
-
-# Behavioral Insights
 st.subheader("📊 Track User Behavior")
 behavior_user = st.text_input("Enter username to track:")
-user_behavior = {}
 
 if st.button("Check Violations"):
     if behavior_user:
-        if behavior_user not in user_behavior:
-            user_behavior[behavior_user] = 0
-        user_behavior[behavior_user] += 1
-        st.info(f"User {behavior_user} has been flagged {user_behavior[behavior_user]} times.")
+        count = track_violation(behavior_user)
+        st.info(f"User {behavior_user} has been flagged {count} times.")
     else:
         st.warning("Please enter a username.")
 
-st.write("**🔹 AI-powered moderation for a healthier online community.**")
+st.subheader("⏳ Apply Cooling-Off Period")
+cool_off_user = st.text_input("Enter username for suspension:")
+if st.button("Apply Cooling-Off"):
+    if cool_off_user:
+        st.success(apply_cooling_off(cool_off_user))
+    else:
+        st.warning("Please enter a username.")
 
+st.subheader("🗳️ Community Moderation Panel")
+moderation_user = st.text_input("Enter username for review:")
+moderation_text = st.text_area("Enter message for community review:")
+if st.button("Submit for Review"):
+    if moderation_user and moderation_text:
+        st.info(community_review(moderation_user, moderation_text))
+    else:
+        st.warning("Please enter a username and message.")
 
-st.code("""
-pip install streamlit pandas numpy scikit-learn nltk
-streamlit run project.py
-""")
+st.subheader("🤖 Conflict Resolution Bot")
+dispute_text = st.text_area("Enter message to de-escalate:")
+if st.button("Resolve Conflict"):
+    if dispute_text:
+        st.write(f"**Resolution Suggestion:** {resolve_conflict(dispute_text)}")
+    else:
+        st.warning("Please enter a message.")
+
+st.subheader("📈 Behavioral Insights")
+insights_user = st.text_input("Enter username to analyze:")
+if st.button("Analyze Behavior"):
+    if insights_user:
+        violations = analyze_behavior(insights_user)
+        st.info(f"User {insights_user} has {violations} recorded violations.")
+    else:
+        st.warning("Please enter a username.")
+
+st.write("🔹 **AI-powered moderation for a healthier online community.**")
